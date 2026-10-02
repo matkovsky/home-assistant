@@ -1,0 +1,192 @@
+blueprint:
+  name: Switch → Light control (single/double/hold)
+  description: >
+    Single push toggles the selected light(s) as a group. Double push sets a
+    fixed brightness/color temperature. Holding the button dims up and down
+    between min and max; releasing keeps the current level. Requires a Shelly
+    input in button mode exposing long_push and btn_up events.
+  domain: automation
+  author: Peter
+  source_url: https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/switch_light_control.yaml
+  input:
+    switch_event:
+      name: Switch input
+      description: Event entity of the switch input (Shelly input in detached mode)
+      selector:
+        entity:
+          filter:
+            - domain: event
+    lights:
+      name: Light(s)
+      description: When dimming, the first light's brightness is the starting point.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: light
+    double_push_settings:
+      name: Double push scene
+      icon: mdi:gesture-double-tap
+      collapsed: true
+      input:
+        brightness_pct:
+          name: Brightness
+          default: 100
+          selector:
+            number:
+              min: 1
+              max: 100
+              unit_of_measurement: "%"
+              mode: slider
+        color_temp_kelvin:
+          name: Color temperature
+          default: 4000
+          selector:
+            color_temp:
+              unit: kelvin
+              min: 2000
+              max: 6500
+        transition:
+          name: Transition
+          default: 2
+          selector:
+            number:
+              min: 0
+              max: 10
+              step: 0.5
+              unit_of_measurement: s
+    hold_settings:
+      name: Hold-to-dim
+      icon: mdi:gesture-tap-hold
+      collapsed: true
+      input:
+        dim_min:
+          name: Minimum brightness
+          default: 10
+          selector:
+            number: {min: 1, max: 99, unit_of_measurement: "%", mode: slider}
+        dim_max:
+          name: Maximum brightness
+          default: 100
+          selector:
+            number: {min: 2, max: 100, unit_of_measurement: "%", mode: slider}
+        dim_step:
+          name: Step size
+          default: 5
+          selector:
+            number: {min: 1, max: 25, unit_of_measurement: "%"}
+        dim_interval:
+          name: Step interval
+          description: Time between steps. 300–500 ms is a good range for Zigbee lights.
+          default: 400
+          selector:
+            number: {min: 150, max: 2000, step: 50, unit_of_measurement: ms}
+        dim_max_steps:
+          name: Safety limit (steps)
+          description: Stops the loop if the release event is ever missed.
+          default: 75
+          selector:
+            number: {min: 10, max: 300}
+
+variables:
+  lights: !input lights
+  min_pct: !input dim_min
+  max_pct: !input dim_max
+  step_pct: !input dim_step
+  interval_ms: !input dim_interval
+  max_steps: !input dim_max_steps
+
+triggers:
+  - trigger: event.received
+    target:
+      entity_id: !input switch_event
+    options:
+      event_type: [single_push]
+    id: SINGLE
+  - trigger: event.received
+    target:
+      entity_id: !input switch_event
+    options:
+      event_type: [double_push]
+    id: DOUBLE
+  - trigger: event.received
+    target:
+      entity_id: !input switch_event
+    options:
+      event_type: [long_push]
+    id: LONG
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: SINGLE
+        sequence:
+          - if:
+              - condition: state
+                entity_id: !input lights
+                state: "on"
+                match: any
+            then:
+              - action: light.turn_off
+                target:
+                  entity_id: !input lights
+            else:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+
+      - conditions:
+          - condition: trigger
+            id: DOUBLE
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: !input lights
+            data:
+              brightness_pct: !input brightness_pct
+              color_temp_kelvin: !input color_temp_kelvin
+              transition: !input transition
+
+      - conditions:
+          - condition: trigger
+            id: LONG
+        sequence:
+          - variables:
+              ref_light: "{{ lights[0] if lights is list else lights }}"
+              span: "{{ max_pct - min_pct }}"
+              start: >
+                {% set b = state_attr(ref_light, 'brightness') %}
+                {% if is_state(ref_light, 'on') and b %}
+                  {{ [[(b | int / 2.55) | round(0) | int, min_pct] | max, max_pct] | min }}
+                {% else %}
+                  {{ min_pct }}
+                {% endif %}
+          - repeat:
+              sequence:
+                - variables:
+                    x: "{{ (start - min_pct + repeat.index * step_pct) % (2 * span) }}"
+                    level: "{{ min_pct + (x if x <= span else 2 * span - x) }}"
+                - action: light.turn_on
+                  target:
+                    entity_id: !input lights
+                  data:
+                    brightness_pct: "{{ level }}"
+                    transition: "{{ interval_ms / 1000 }}"
+                - wait_for_trigger:
+                    - trigger: event.received
+                      target:
+                        entity_id: !input switch_event
+                      options:
+                        event_type: [btn_up]
+                  timeout:
+                    milliseconds: "{{ interval_ms }}"
+                  continue_on_timeout: true
+              until:
+                - condition: template
+                  value_template: "{{ wait.trigger is not none or repeat.index >= max_steps }}"
+
+mode: single
+max_exceeded: silent
