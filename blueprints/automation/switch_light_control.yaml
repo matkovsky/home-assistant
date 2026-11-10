@@ -4,9 +4,11 @@ blueprint:
     Single push toggles the selected light(s) as a group. Double push sets a
     fixed brightness/color temperature. Holding the button dims up and down
     between min and max; releasing keeps the current level. Requires a Shelly
-    input in button mode exposing long_push and btn_up events.
+    input in button mode exposing long_push and btn_up events. Optionally
+    power-cycles the lights through their relay when they stay unavailable.
+    Version 1.1.
   domain: automation
-  author: Peter
+  author: Peter Matkovsky
   source_url: https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/switch_light_control.yaml
   input:
     switch_event:
@@ -62,7 +64,7 @@ blueprint:
       input:
         dim_min:
           name: Minimum brightness
-          default: 10
+          default: 5
           selector:
             number: {min: 1, max: 99, unit_of_measurement: "%", mode: slider}
         dim_max:
@@ -87,14 +89,80 @@ blueprint:
           default: 75
           selector:
             number: {min: 10, max: 300}
+    maintenance_settings:
+      name: Maintenance
+      icon: mdi:wrench
+      collapsed: true
+      input:
+        auto_restart_enabled:
+          name: Auto-restart unavailable lights
+          description: >
+            Cuts power to the light fixture through the power switch below when
+            any of the lights stays unavailable. Does nothing until a power
+            switch is selected.
+          default: true
+          selector:
+            boolean:
+        power_switch:
+          name: Power switch
+          description: >
+            The relay that physically powers the light fixture, for example the
+            Shelly output in detached mode. It is turned off and back on to
+            restart the lights.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        unavailable_for:
+          name: Unavailable for
+          description: How long a light must be unavailable before it is restarted.
+          default: 60
+          selector:
+            number: {min: 10, max: 3600, unit_of_measurement: s}
+        power_off_duration:
+          name: Power-off duration
+          description: How long the power stays cut during each restart.
+          default: 2
+          selector:
+            number: {min: 1, max: 30, unit_of_measurement: s}
+        recovery_timeout:
+          name: Recovery timeout
+          description: >
+            How long to wait for the lights to come back online after a
+            restart. If they don't, the restart is repeated.
+          default: 60
+          selector:
+            number: {min: 10, max: 600, unit_of_measurement: s}
+        max_retries:
+          name: Retries
+          description: >
+            How many more times to restart if the first restart doesn't help.
+            When all attempts fail, a persistent notification is shown.
+          default: 3
+          selector:
+            number: {min: 0, max: 10}
+
+trigger_variables:
+  tv_lights: !input lights
+  tv_enabled: !input auto_restart_enabled
+  tv_switch: !input power_switch
 
 variables:
   lights: !input lights
+  lights_list: "{{ lights if lights is list else [lights] }}"
   min_pct: !input dim_min
   max_pct: !input dim_max
   step_pct: !input dim_step
   interval_ms: !input dim_interval
   max_steps: !input dim_max_steps
+  restart_enabled: !input auto_restart_enabled
+  power_switch: !input power_switch
+  unavailable_s: !input unavailable_for
+  power_off_s: !input power_off_duration
+  recovery_s: !input recovery_timeout
+  max_retries: !input max_retries
+  notification_id: "light_auto_restart_{{ this.entity_id }}"
 
 triggers:
   - trigger: event.received
@@ -115,6 +183,19 @@ triggers:
     options:
       event_type: [long_push]
     id: LONG
+  - trigger: template
+    value_template: >
+      {{ tv_enabled and tv_switch not in ['', none]
+         and (tv_lights if tv_lights is list else [tv_lights])
+             | select('is_state', 'unavailable') | list | count > 0 }}
+    for:
+      seconds: !input unavailable_for
+    id: UNAVAILABLE
+  # A template trigger doesn't fire when it's already true at startup, e.g.
+  # lights that never came back after a power outage. This covers that case.
+  - trigger: homeassistant
+    event: start
+    id: STARTUP
 
 conditions: []
 
@@ -188,5 +269,89 @@ actions:
                 - condition: template
                   value_template: "{{ wait.trigger is not none or repeat.index >= max_steps }}"
 
-mode: single
+      - conditions:
+          - condition: trigger
+            id: [UNAVAILABLE, STARTUP]
+          - condition: template
+            value_template: "{{ restart_enabled and power_switch not in ['', none] }}"
+        sequence:
+          - if:
+              - condition: trigger
+                id: STARTUP
+            then:
+              - delay:
+                  seconds: "{{ unavailable_s }}"
+          # Only act on lights that have been unavailable for the full period.
+          # This also stops the startup run from duplicating a restart that the
+          # UNAVAILABLE trigger already started.
+          - condition: template
+            value_template: >
+              {% set ns = namespace(stale=false) %}
+              {% for l in lights_list %}
+                {% if is_state(l, 'unavailable')
+                      and (now() - states[l].last_changed).total_seconds() >= unavailable_s - 1 %}
+                  {% set ns.stale = true %}
+                {% endif %}
+              {% endfor %}
+              {{ ns.stale }}
+          - variables:
+              was_on: "{{ lights_list | select('is_state', 'on') | list | count > 0 }}"
+          - repeat:
+              sequence:
+                - action: switch.turn_off
+                  target:
+                    entity_id: "{{ power_switch }}"
+                - delay:
+                    seconds: "{{ power_off_s }}"
+                - action: switch.turn_on
+                  target:
+                    entity_id: "{{ power_switch }}"
+                - wait_template: >
+                    {{ lights_list | select('is_state', 'unavailable') | list | count == 0 }}
+                  timeout:
+                    seconds: "{{ recovery_s }}"
+                  continue_on_timeout: true
+              until:
+                - condition: template
+                  value_template: "{{ wait.completed or repeat.index > max_retries }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ lights_list | select('is_state', 'unavailable') | list | count == 0 }}
+            then:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: "{{ notification_id }}"
+              # Bulbs often switch themselves on after power returns, so put the
+              # group back the way it was before the restart.
+              - delay:
+                  seconds: 2
+              - if:
+                  - condition: template
+                    value_template: "{{ was_on }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ lights_list }}"
+                else:
+                  - action: light.turn_off
+                    target:
+                      entity_id: "{{ lights_list }}"
+            else:
+              - action: persistent_notification.create
+                data:
+                  notification_id: "{{ notification_id }}"
+                  title: Lights still unavailable
+                  message: >
+                    {{ lights_list | select('is_state', 'unavailable')
+                       | map('state_attr', 'friendly_name') | join(', ') }}
+                    stayed unavailable after {{ (max_retries | int) + 1 }}
+                    power cycle(s) via
+                    {{ state_attr(power_switch, 'friendly_name') or power_switch }}
+                    ({{ this.attributes.friendly_name }}).
+
+# parallel so a restart that takes minutes doesn't block the button, and the
+# button doesn't swallow a restart trigger.
+mode: parallel
+max: 10
 max_exceeded: silent
