@@ -1,0 +1,237 @@
+blueprint:
+  name: Scheduled blinds (sun/time) with motion guard
+  description: >
+    Moves the selected blinds/shades to a set position at sunrise, sunset (with
+    an optional offset) or a fixed time. Optionally postpones the move until the
+    selected motion sensors have seen no motion for a set time and the selected
+    doors/windows are closed, so nobody gets shut out on the terrace. If that
+    doesn't happen within the postpone limit, the blinds are left alone and a
+    notification is shown. Version 1.0.
+  domain: automation
+  author: Peter Matkovsky
+  source_url: https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/cover_schedule.yaml
+  input:
+    covers:
+      name: Blinds / shades
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: cover
+    position:
+      name: Position
+      description: >
+        Home Assistant convention: 0 = fully closed, 100 = fully open. Covers
+        without position support are closed at 0 and opened at 100; other values
+        are skipped for them.
+      default: 0
+      selector:
+        number: {min: 0, max: 100, unit_of_measurement: "%", mode: slider}
+
+    schedule_settings:
+      name: When
+      icon: mdi:weather-sunset
+      input:
+        when:
+          name: Time of day
+          default: sunset
+          selector:
+            select:
+              options:
+                - {label: Sunrise, value: sunrise}
+                - {label: Sunset, value: sunset}
+                - {label: Fixed time, value: time}
+        sun_offset:
+          name: Offset (sunrise/sunset only)
+          description: >
+            Positive = after the sun event, negative = before. For example
+            +1:00:00 runs one hour after sunset.
+          default: {hours: 0, minutes: 0, seconds: 0}
+          selector:
+            duration:
+              allow_negative: true
+        fixed_time:
+          name: Fixed time (fixed time only)
+          default: "21:00:00"
+          selector:
+            time:
+        weekdays:
+          name: Days of week
+          default: [mon, tue, wed, thu, fri, sat, sun]
+          selector:
+            select:
+              multiple: true
+              options:
+                - {label: Monday, value: mon}
+                - {label: Tuesday, value: tue}
+                - {label: Wednesday, value: wed}
+                - {label: Thursday, value: thu}
+                - {label: Friday, value: fri}
+                - {label: Saturday, value: sat}
+                - {label: Sunday, value: sun}
+        enable_entity:
+          name: Enable toggle (optional)
+          description: >
+            An input_boolean that must be on for the schedule to run, e.g. a
+            "blinds automation" or inverted "vacation mode" helper. Leave empty
+            to always run.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+
+    guard_settings:
+      name: Safety guard
+      icon: mdi:motion-sensor
+      input:
+        motion_sensors:
+          name: Motion sensors (optional)
+          description: >
+            The move waits until all of these have been clear for the interval
+            below. An unavailable sensor counts as not clear.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+                  device_class: [motion, occupancy, presence]
+        no_motion_for:
+          name: No motion for
+          description: How long all motion sensors must be clear before the move.
+          default: 10
+          selector:
+            number: {min: 1, max: 120, unit_of_measurement: min}
+        contact_sensors:
+          name: Doors / windows (optional)
+          description: >
+            The move waits while any of these is open, e.g. the terrace door.
+            An unavailable sensor counts as open.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+                  device_class: [door, window, opening, garage_door]
+        max_postpone:
+          name: Postpone limit
+          description: >
+            How long to keep waiting for the guard to clear. If it doesn't, the
+            blinds are not moved and a notification is shown. 0 = don't wait,
+            skip right away.
+          default: 120
+          selector:
+            number: {min: 0, max: 720, step: 5, unit_of_measurement: min}
+
+variables:
+  when: !input when
+  covers: !input covers
+  covers_list: "{{ covers if covers is list else [covers] }}"
+  target_position: !input position
+  enable_entity: !input enable_entity
+  motion_sensors: !input motion_sensors
+  contact_sensors: !input contact_sensors
+  no_motion_for: !input no_motion_for
+  max_postpone: !input max_postpone
+  no_motion_s: "{{ (no_motion_for | float) * 60 }}"
+  max_postpone_s: "{{ (max_postpone | float) * 60 }}"
+  notification_id: "cover_schedule_{{ this.entity_id }}"
+
+triggers:
+  - trigger: sun
+    event: sunrise
+    offset: !input sun_offset
+    id: sunrise
+  - trigger: sun
+    event: sunset
+    offset: !input sun_offset
+    id: sunset
+  - trigger: time
+    at: !input fixed_time
+    id: time
+
+conditions:
+  - condition: template
+    value_template: "{{ trigger.id == when }}"
+  - condition: time
+    weekday: !input weekdays
+  - condition: template
+    value_template: "{{ enable_entity in ['', none] or is_state(enable_entity, 'on') }}"
+
+actions:
+  # The guard is clear when every motion sensor has been off for the full
+  # interval and every contact sensor is closed. now() makes HA re-check this
+  # once a minute while waiting, so the interval is accurate to about a minute.
+  - wait_template: >
+      {% set ns = namespace(clear=true) %}
+      {% for s in motion_sensors %}
+        {% if not is_state(s, 'off')
+              or (now() - states[s].last_changed).total_seconds() < no_motion_s %}
+          {% set ns.clear = false %}
+        {% endif %}
+      {% endfor %}
+      {% for s in contact_sensors %}
+        {% if not is_state(s, 'off') %}
+          {% set ns.clear = false %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.clear }}
+    timeout:
+      seconds: "{{ max_postpone_s }}"
+    continue_on_timeout: true
+
+  - if:
+      - condition: template
+        value_template: "{{ wait.completed }}"
+    then:
+      # The helper may have been switched off while we were waiting.
+      - condition: template
+        value_template: "{{ enable_entity in ['', none] or is_state(enable_entity, 'on') }}"
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: "{{ notification_id }}"
+      - repeat:
+          for_each: "{{ covers_list }}"
+          sequence:
+            - variables:
+                features: "{{ state_attr(repeat.item, 'supported_features') | int(0) }}"
+            - choose:
+                # SET_POSITION = 4
+                - conditions: "{{ features | bitwise_and(4) > 0 }}"
+                  sequence:
+                    - action: cover.set_cover_position
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        position: "{{ target_position | int }}"
+                - conditions: "{{ target_position | int == 0 }}"
+                  sequence:
+                    - action: cover.close_cover
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                - conditions: "{{ target_position | int == 100 }}"
+                  sequence:
+                    - action: cover.open_cover
+                      target:
+                        entity_id: "{{ repeat.item }}"
+    else:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notification_id }}"
+          title: Blinds not moved
+          message: >
+            {% set busy = motion_sensors | reject('is_state', 'off') | list %}
+            {% set open = contact_sensors | reject('is_state', 'off') | list %}
+            {{ this.attributes.friendly_name }} didn't move
+            {{ covers_list | map('state_attr', 'friendly_name') | join(', ') }}
+            because the safety guard didn't clear within {{ max_postpone }} min.
+            {%- if busy %} Motion / not clear: {{ busy | map('state_attr', 'friendly_name') | join(', ') }}.{% endif %}
+            {%- if open %} Open / not clear: {{ open | map('state_attr', 'friendly_name') | join(', ') }}.{% endif %}
+            {%- if not busy and not open %} There was motion within the last {{ no_motion_for }} min.{% endif %}
+
+# single: if a postpone is still running, a second trigger (e.g. a fixed time
+# changed mid-wait) is dropped rather than moving the blinds twice.
+mode: single
+max_exceeded: silent

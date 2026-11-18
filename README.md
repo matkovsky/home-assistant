@@ -39,3 +39,27 @@ Go to **Blueprints → ⋮ → Re-import blueprint**. Every automation that uses
 
 - **1.1**: Adds the Maintenance section, which auto-restarts lights that stay unavailable by power-cycling their relay. The automation mode changes from `single` to `parallel`, so a restart doesn't block the button.
 - **1.0**: Single push, double push and hold-to-dim.
+
+### Scheduled blinds (sun/time) with motion guard
+
+Moves one or more blinds/shades to a set position at sunrise or sunset (with an optional ± offset, e.g. *sunset + 1 h*) or at a fixed time. Create one automation per schedule, e.g. one for "close at sunset" and one for "open at sunrise".
+
+Position uses the Home Assistant convention: **0 = fully closed, 100 = fully open**. Covers that don't support positions are closed at 0 and opened at 100.
+
+**Safety guard (optional):** Select motion sensors and a *No motion for* interval, plus any doors/windows (e.g. the terrace door). At the scheduled time, the blueprint waits until every motion sensor has been clear for the full interval and every door/window is closed, then moves the blinds. If the guard doesn't clear within the *Postpone limit* (default 2 h), the blinds are left alone and a persistent notification says which sensor blocked them. Unavailable sensors count as not clear. Set the limit to 0 to skip right away instead of waiting.
+
+**Also:** days of week, and an optional `input_boolean` that must be on for the schedule to run (e.g. a vacation-mode helper).
+
+#### Install
+
+[![Open your Home Assistant instance and show the blueprint import dialog with this blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fmatkovsky%2Fhome-assistant%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fcover_schedule.yaml)
+
+Or import this URL via **Settings → Automations & Scenes → Blueprints → Import Blueprint**:
+
+```
+https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/cover_schedule.yaml
+```
+
+#### Changelog
+
+- **1.0**: Sun/fixed-time schedule with offset, position, motion + door/window guard with postpone, weekdays, enable toggle.
