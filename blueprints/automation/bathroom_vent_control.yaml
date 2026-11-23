@@ -1,0 +1,184 @@
+blueprint:
+  name: Bathroom vent (humidity + max runtime + button)
+  description: >
+    Turns the bathroom vent on when humidity rises above a set level. Every run
+    stops when humidity drops below the off level or when the maximum runtime is
+    reached, whichever comes first. This applies whether the run was started by
+    humidity, by the button, or (optionally) from the dashboard or the wall
+    switch. The button toggles the vent: pressing it while the vent runs turns
+    it off immediately and cancels the run. Version 1.0.
+  domain: automation
+  author: Peter Matkovsky
+  source_url: https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/bathroom_vent_control.yaml
+  input:
+    vent:
+      name: Vent
+      description: The relay or fan entity that powers the vent (e.g. the Shelly output).
+      selector:
+        entity:
+          filter:
+            - domain: [fan, switch]
+    humidity_sensor:
+      name: Humidity sensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: humidity
+
+    humidity_settings:
+      name: Humidity
+      icon: mdi:water-percent
+      input:
+        on_above:
+          name: Turn on above
+          description: The vent starts when humidity rises above this level.
+          default: 70
+          selector:
+            number: {min: 30, max: 100, unit_of_measurement: "%", mode: slider}
+        off_below:
+          name: Turn off below
+          description: >
+            The vent stops when humidity drops below this level. Keep it a few
+            percent under "Turn on above" so the vent doesn't flap on and off.
+            If humidity is already below this level when the vent starts (e.g.
+            from the button), the vent runs for the full maximum runtime.
+          default: 60
+          selector:
+            number: {min: 20, max: 100, unit_of_measurement: "%", mode: slider}
+
+    runtime_settings:
+      name: Runtime
+      icon: mdi:timer-outline
+      input:
+        max_runtime:
+          name: Maximum runtime
+          description: Every run stops after this long, even if humidity is still high.
+          default: 30
+          selector:
+            number: {min: 1, max: 240, unit_of_measurement: min}
+        apply_to_external:
+          name: Also limit runs started elsewhere
+          description: >
+            When on, the runtime and humidity limits also apply when the vent
+            is turned on from the dashboard, the wall switch, voice, or another
+            automation. When off, those runs are left alone until something
+            turns the vent off.
+          default: true
+          selector:
+            boolean:
+
+    button_settings:
+      name: Button
+      icon: mdi:gesture-double-tap
+      input:
+        button_trigger:
+          name: Button gesture
+          description: >
+            Add the trigger(s) that toggle the vent, e.g. a Device trigger such as
+            "IKEA button: double press" or "Aqara switch: double click". Any
+            trigger works, and you can add several (e.g. double press and
+            hold). Leave it empty if you don't use a button.
+          default: []
+          selector:
+            trigger:
+
+variables:
+  vent: !input vent
+  runtime_min: !input max_runtime
+  apply_to_external: !input apply_to_external
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input humidity_sensor
+    above: !input on_above
+    id: HUMID_HIGH
+  - trigger: state
+    entity_id: !input vent
+    from: "off"
+    to: "on"
+    id: VENT_ON
+  - trigger: state
+    entity_id: !input vent
+    to: "off"
+    id: VENT_OFF
+  # A restart or an automation reload kills the running timer. These triggers
+  # pick up a vent that was left running so it doesn't run forever.
+  - trigger: homeassistant
+    event: start
+    id: RESUME
+  - trigger: event
+    event_type: automation_reloaded
+    id: RESUME
+  # The user-configured button trigger(s). They have no fixed id, so in the
+  # actions anything that isn't one of the ids above counts as the button.
+  - triggers: !input button_trigger
+
+# mode: restart is the key to this design. Each trigger stops the run in
+# progress and starts fresh. A button press or an "off" from anywhere cancels
+# the timer, and a new humidity rise starts the timer again.
+#
+# A failing condition does NOT restart the automation, so when external runs
+# are excluded, VENT_ON is filtered out here. It then can't cancel the run that
+# this automation itself just started.
+conditions:
+  - condition: template
+    value_template: "{{ trigger.id != 'VENT_ON' or apply_to_external }}"
+
+actions:
+  - choose:
+      # Vent turned off by anything (button, dashboard, wall switch, our own
+      # timer): the restart already cancelled the run, so there's nothing left.
+      - conditions:
+          - condition: trigger
+            id: VENT_OFF
+        sequence:
+          - stop: Vent is off
+      - conditions:
+          - condition: trigger
+            id: RESUME
+          - condition: template
+            value_template: "{{ not is_state(vent, 'on') }}"
+        sequence:
+          - stop: Nothing to resume
+      # Button while the vent runs: turn it off right away.
+      - conditions:
+          - condition: not
+            conditions:
+              - condition: trigger
+                id: [HUMID_HIGH, VENT_ON, RESUME]
+          - condition: template
+            value_template: "{{ is_state(vent, 'on') }}"
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: "{{ vent }}"
+          - stop: Turned off by button
+
+  # Every path that reaches here is a run: humidity rose, the button turned the
+  # vent on, the vent was turned on elsewhere, or a run is being resumed.
+  - if:
+      - condition: template
+        value_template: "{{ not is_state(vent, 'on') }}"
+    then:
+      # When external runs are limited, this turn-on fires VENT_ON, which
+      # restarts the automation and runs the same wait below. The result is the same.
+      - action: homeassistant.turn_on
+        target:
+          entity_id: "{{ vent }}"
+
+  # Waits for humidity to cross below the off level. If it's already below,
+  # no crossing happens, so the vent runs for the full maximum runtime.
+  - wait_for_trigger:
+      - trigger: numeric_state
+        entity_id: !input humidity_sensor
+        below: !input off_below
+    timeout:
+      minutes: "{{ runtime_min }}"
+    continue_on_timeout: true
+  - action: homeassistant.turn_off
+    target:
+      entity_id: "{{ vent }}"
+
+mode: restart
+max_exceeded: silent

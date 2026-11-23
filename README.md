@@ -63,3 +63,35 @@ https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/cove
 #### Changelog
 
 - **1.0**: Sun/fixed-time schedule with offset, position, motion + door/window guard with postpone, weekdays, enable toggle.
+
+### Bathroom vent (humidity + max runtime + button)
+
+Runs a bathroom vent (e.g. a Shelly relay) based on humidity, with a hard runtime limit and an optional toggle button. Create one automation per bathroom.
+
+**Every run follows the same rule:** the vent stops when humidity drops below *Turn off below* **or** when *Maximum runtime* is reached, whichever comes first. This applies to runs started by:
+
+| Started by | Behaviour |
+| --- | --- |
+| Humidity rising above *Turn on above* | Vent turns on, then the run rule applies |
+| Button gesture while the vent is off | Vent turns on, then the run rule applies. If humidity is already below the off level, it runs for the full max runtime |
+| Button gesture while the vent is on | Vent turns off **immediately** and the run is cancelled |
+| Dashboard / wall switch / voice / other automation | Same run rule if *Also limit runs started elsewhere* is on (default). Turning it off from anywhere cancels the run |
+| Humidity rising again during a run (new shower) | Max-runtime timer starts again |
+
+The on and off levels are separate, so you can leave a gap between them, e.g. on above 70 %, off below 60 %. After a Home Assistant restart or an automation reload, a vent that was left running gets a fresh max-runtime timer, so it never runs indefinitely. If the timer stops the vent while humidity is still high, it stays off until humidity drops and rises above the on level again, or until you press the button.
+
+**Button:** The button is configured as a trigger. Click **Add trigger → Device**, pick your IKEA/Aqara/Hue button and choose the gesture, e.g. *double press*. You can add several gestures. Any trigger type works: ZHA and Zigbee2MQTT device triggers, event entities, or a Shelly input.
+
+#### Install
+
+[![Open your Home Assistant instance and show the blueprint import dialog with this blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fmatkovsky%2Fhome-assistant%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fbathroom_vent_control.yaml)
+
+Or import this URL via **Settings → Automations & Scenes → Blueprints → Import Blueprint**:
+
+```
+https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/bathroom_vent_control.yaml
+```
+
+#### Changelog
+
+- **1.0**: Humidity on/off levels, max runtime, button toggle via trigger selector, optional limits for externally started runs, resume after restart/reload.
