@@ -68,7 +68,7 @@ https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/cove
 
 Runs a bathroom vent (e.g. a Shelly relay) based on humidity, with a hard runtime limit and an optional toggle button. Create one automation per bathroom.
 
-**Every run follows the same rule:** the vent stops when humidity drops below *Turn off below* **or** when *Maximum runtime* is reached, whichever comes first. This applies to runs started by:
+**Every run follows the same rule:** the vent stops when humidity has stayed below *Turn off below* for the *Stay below for* time **or** when *Maximum runtime* is reached, whichever comes first. This applies to runs started by:
 
 | Started by | Behaviour |
 | --- | --- |
@@ -78,7 +78,7 @@ Runs a bathroom vent (e.g. a Shelly relay) based on humidity, with a hard runtim
 | Dashboard / wall switch / voice / other automation | Same run rule if *Also limit runs started elsewhere* is on (default). Turning it off from anywhere cancels the run |
 | Humidity rising again during a run (new shower) | Max-runtime timer starts again |
 
-The on and off levels are separate, so you can leave a gap between them, e.g. on above 70 %, off below 60 %. After a Home Assistant restart or an automation reload, a vent that was left running gets a fresh max-runtime timer, so it never runs indefinitely. If the timer stops the vent while humidity is still high, it stays off until humidity drops and rises above the on level again, or until you press the button.
+The on and off levels are separate, so you can leave a gap between them, e.g. on above 70 %, off below 60 %. A single stray low reading would otherwise stop the vent and the next normal reading would start it again, so *Stay below for* (default 3 min) holds the vent on until the reading has settled below the off level; a reading back at or above it restarts the hold. After a Home Assistant restart or an automation reload, a vent that was left running gets a fresh max-runtime timer, so it never runs indefinitely. If the timer stops the vent while humidity is still high, it stays off until humidity drops and rises above the on level again, or until you press the button.
 
 **Button:** The button is configured as a trigger. Click **Add trigger → Device**, pick your IKEA/Aqara/Hue button and choose the gesture, e.g. *double press*. You can add several gestures. Any trigger type works: ZHA and Zigbee2MQTT device triggers, event entities, or a Shelly input.
 
@@ -94,4 +94,5 @@ https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/bath
 
 #### Changelog
 
+- **1.1**: *Stay below for* hold on the off level, so stray low humidity readings no longer switch the vent off and on repeatedly.
 - **1.0**: Humidity on/off levels, max runtime, button toggle via trigger selector, optional limits for externally started runs, resume after restart/reload.
