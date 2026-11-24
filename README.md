@@ -68,17 +68,20 @@ https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/cove
 
 Runs a bathroom vent (e.g. a Shelly relay) based on humidity, with a hard runtime limit and an optional toggle button. Create one automation per bathroom.
 
-**Every run follows the same rule:** the vent stops when humidity has stayed below *Turn off below* for the *Stay below for* time **or** when *Maximum runtime* is reached, whichever comes first. This applies to runs started by:
+**There are two kinds of run, decided by humidity at the moment the run starts:**
+
+- **Humid run** (humidity is above *Turn on above*): the vent stops when humidity has stayed below *Turn off below* for the *Stay below for* time **or** when *Maximum runtime* is reached, whichever comes first.
+- **Timed run** (humidity is at or below *Turn on above*): the vent runs for the full *Maximum runtime*. The off level is ignored, so a run started just above it doesn't end minutes later when humidity settles below it.
 
 | Started by | Behaviour |
 | --- | --- |
-| Humidity rising above *Turn on above* | Vent turns on, then the run rule applies |
-| Button gesture while the vent is off | Vent turns on, then the run rule applies. If humidity is already below the off level, it runs for the full max runtime |
+| Humidity rising above *Turn on above* | Vent turns on for a humid run |
+| Button gesture while the vent is off | Vent turns on for a timed run, or a humid run if humidity is above the on level |
 | Button gesture while the vent is on | Vent turns off **immediately** and the run is cancelled |
-| Dashboard / wall switch / voice / other automation | Same run rule if *Also limit runs started elsewhere* is on (default). Turning it off from anywhere cancels the run |
-| Humidity rising again during a run (new shower) | Max-runtime timer starts again |
+| Dashboard / wall switch / voice / other automation | Same as the button if *Also limit runs started elsewhere* is on (default). Turning it off from anywhere cancels the run |
+| Humidity rising above the on level during a run (new shower) | The run becomes a humid run and the max-runtime timer starts again |
 
-The on and off levels are separate, so you can leave a gap between them, e.g. on above 70 %, off below 60 %. A single stray low reading would otherwise stop the vent and the next normal reading would start it again, so *Stay below for* (default 3 min) holds the vent on until the reading has settled below the off level; a reading back at or above it restarts the hold. After a Home Assistant restart or an automation reload, a vent that was left running gets a fresh max-runtime timer, so it never runs indefinitely. If the timer stops the vent while humidity is still high, it stays off until humidity drops and rises above the on level again, or until you press the button.
+The on and off levels are separate, so you can leave a gap between them, e.g. on above 70 %, off below 60 %. A single stray low reading would otherwise stop the vent and the next normal reading would start it again, so *Stay below for* (default 5 min) holds the vent on until the reading has settled below the off level; a reading back at or above it restarts the hold. After a Home Assistant restart or an automation reload, a vent that was left running gets a fresh max-runtime timer, so it never runs indefinitely. If the timer stops the vent while humidity is still high, it stays off until humidity drops and rises above the on level again, or until you press the button.
 
 **Button:** The button is configured as a trigger. Click **Add trigger → Device**, pick your IKEA/Aqara/Hue button and choose the gesture, e.g. *double press*. You can add several gestures. Any trigger type works: ZHA and Zigbee2MQTT device triggers, event entities, or a Shelly input.
 
@@ -94,5 +97,6 @@ https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/bath
 
 #### Changelog
 
+- **1.2**: Runs started while humidity is at or below the on level (button, dashboard, wall switch) now run for the full max runtime instead of stopping at the off level.
 - **1.1**: *Stay below for* hold on the off level, so stray low humidity readings no longer switch the vent off and on repeatedly.
 - **1.0**: Humidity on/off levels, max runtime, button toggle via trigger selector, optional limits for externally started runs, resume after restart/reload.

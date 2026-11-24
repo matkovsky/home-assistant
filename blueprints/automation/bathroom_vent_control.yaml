@@ -1,12 +1,13 @@
 blueprint:
   name: Bathroom vent (humidity + max runtime + button)
   description: >
-    Turns the bathroom vent on when humidity rises above a set level. Every run
-    stops when humidity has stayed below the off level for a set time or when
-    the maximum runtime is reached, whichever comes first. This applies whether
-    the run was started by humidity, by the button, or (optionally) from the
-    dashboard or the wall switch. The button toggles the vent: pressing it while
-    the vent runs turns it off immediately and cancels the run. Version 1.1.
+    Turns the bathroom vent on when humidity rises above a set level. A run
+    that starts while humidity is above the on level stops when humidity has
+    stayed below the off level for a set time or when the maximum runtime is
+    reached, whichever comes first. A run that starts at lower humidity (from
+    the button or, optionally, the dashboard or the wall switch) runs for the
+    full maximum runtime. The button toggles the vent: pressing it while the
+    vent runs turns it off immediately and cancels the run. Version 1.2.
   domain: automation
   author: Peter Matkovsky
   source_url: https://github.com/matkovsky/home-assistant/blob/main/blueprints/automation/bathroom_vent_control.yaml
@@ -41,8 +42,9 @@ blueprint:
           description: >
             The vent stops when humidity drops below this level. Keep it a few
             percent under "Turn on above" so the vent doesn't flap on and off.
-            If humidity is already below this level when the vent starts (e.g.
-            from the button), the vent runs for the full maximum runtime.
+            This level only applies to runs that start while humidity is above
+            "Turn on above". A run started at lower humidity (e.g. from the
+            button) ignores it and runs for the full maximum runtime.
           default: 60
           selector:
             number: {min: 20, max: 100, unit_of_measurement: "%", mode: slider}
@@ -53,7 +55,7 @@ blueprint:
             vent stops. Without this hold a single stray low reading stops the
             vent, and the next normal reading starts it again. Set it to 0 to
             stop on the first reading below the off level.
-          default: 3
+          default: 5
           selector:
             number: {min: 0, max: 30, unit_of_measurement: min}
 
@@ -70,9 +72,9 @@ blueprint:
         apply_to_external:
           name: Also limit runs started elsewhere
           description: >
-            When on, the runtime and humidity limits also apply when the vent
-            is turned on from the dashboard, the wall switch, voice, or another
-            automation. When off, those runs are left alone until something
+            When on, runs started from the dashboard, the wall switch, voice,
+            or another automation are limited the same way as runs started by
+            the button. When off, those runs are left alone until something
             turns the vent off.
           default: true
           selector:
@@ -95,6 +97,8 @@ blueprint:
 
 variables:
   vent: !input vent
+  humidity_sensor: !input humidity_sensor
+  on_above: !input on_above
   runtime_min: !input max_runtime
   apply_to_external: !input apply_to_external
 
@@ -172,25 +176,38 @@ actions:
         value_template: "{{ not is_state(vent, 'on') }}"
     then:
       # When external runs are limited, this turn-on fires VENT_ON, which
-      # restarts the automation and runs the same wait below. The result is the same.
+      # restarts the automation and runs the same steps below. The result is
+      # the same.
       - action: homeassistant.turn_on
         target:
           entity_id: "{{ vent }}"
 
-  # Waits for humidity to cross below the off level and stay there. A reading
-  # back at or above the off level resets the hold, so a stray low reading
-  # doesn't stop the vent only for the next reading to start it again.
-  # If humidity is already below when the wait starts, no crossing happens, so
-  # the vent runs for the full maximum runtime.
-  - wait_for_trigger:
-      - trigger: numeric_state
-        entity_id: !input humidity_sensor
-        below: !input off_below
-        for:
-          minutes: !input off_delay
-    timeout:
-      minutes: "{{ runtime_min }}"
-    continue_on_timeout: true
+  # The kind of run is decided by humidity, not by what started it, because a
+  # restart through VENT_ON loses the original trigger.
+  - if:
+      - condition: template
+        value_template: "{{ states(humidity_sensor) | float(0) > on_above | float(0) }}"
+    then:
+      # Humid run: waits for humidity to cross below the off level and stay
+      # there. A reading back at or above the off level resets the hold, so a
+      # stray low reading doesn't stop the vent only for the next reading to
+      # start it again.
+      - wait_for_trigger:
+          - trigger: numeric_state
+            entity_id: !input humidity_sensor
+            below: !input off_below
+            for:
+              minutes: !input off_delay
+        timeout:
+          minutes: "{{ runtime_min }}"
+        continue_on_timeout: true
+    else:
+      # Started at or below the on level (button, dashboard, wall switch):
+      # the off level is ignored, otherwise a run started just above it would
+      # end minutes later when humidity settles below it. If humidity rises
+      # above the on level meanwhile, HUMID_HIGH restarts this as a humid run.
+      - delay:
+          minutes: "{{ runtime_min }}"
   - action: homeassistant.turn_off
     target:
       entity_id: "{{ vent }}"
